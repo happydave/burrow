@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/happydave/burrow/internal/admission"
 )
 
 // Backoff defaults, from the man page's connect-retry.
 const (
 	DefaultConnectRetry    = time.Second
-	DefaultConnectRetryMax = 300 * time.Second
+	DefaultConnectRetryCap = 300 * time.Second
 )
 
 // stableFor is how long a tunnel must last for the Redialer to count it a
@@ -40,7 +42,13 @@ func permanent(err error) bool {
 	if !errors.As(err, &e) {
 		return true
 	}
-	return errors.Is(err, KindAuthFailed) || errors.Is(err, KindCertRejected) || errors.Is(err, KindUnsupportedPush)
+	if errors.Is(err, KindAdmissionRefused) {
+		// A policy refusal passes with time; a store that cannot work
+		// (no flock, a corrupt or unreadable history) does not.
+		return !errors.Is(err, admission.ErrRefused)
+	}
+	return errors.Is(err, KindAuthFailed) || errors.Is(err, KindCertRejected) || errors.Is(err, KindUnsupportedPush) ||
+		errors.Is(err, KindHalted)
 }
 
 // Redialer keeps one configuration connected: each Next returns a new
@@ -76,24 +84,29 @@ func sleep(ctx context.Context, d time.Duration) error {
 // returned last if that is still open, waits as the backoff requires, and
 // connects, repeating until a tunnel is established, ctx ends, or the
 // error is one retrying cannot fix (AUTH_FAILED, a rejected server
-// certificate, an unsupported pushed option, an invalid Config), which it
-// returns.
+// certificate, an unsupported pushed option, a HALT, an admission store
+// that cannot work, an invalid Config), which it returns. It also returns,
+// without connecting, a HALT that ended the previous tunnel.
 func (r *Redialer) Next(ctx context.Context) (*Tunnel, error) {
 	if p := r.prev; p != nil {
 		r.prev = nil
 		_ = p.Close()
+		if err := p.Err(); errors.Is(err, KindHalted) {
+			// The server asked this client not to reconnect (spec notes 9).
+			return nil, err
+		}
 		if p.ended.Sub(p.established) < stableFor {
 			r.failures++
 		} else {
 			r.failures = 0
 		}
 	}
-	base, maxWait := r.cfg.ConnectRetry, r.cfg.ConnectRetryMax
+	base, maxWait := r.cfg.ConnectRetry, r.cfg.ConnectRetryCap
 	if base == 0 {
 		base = DefaultConnectRetry
 	}
 	if maxWait == 0 {
-		maxWait = DefaultConnectRetryMax
+		maxWait = DefaultConnectRetryCap
 	}
 	for {
 		if d := backoff(r.failures, base, maxWait); d > 0 {

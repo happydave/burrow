@@ -38,6 +38,7 @@ const (
 	KindAuthFailed          Kind = "AUTH_FAILED"
 	KindUnsupportedPush     Kind = "unsupported pushed option"
 	KindClosedByServer      Kind = "closed by server"
+	KindHalted              Kind = "halted by server"
 	KindCanceled            Kind = "canceled"
 	KindMessageTooLong      Kind = "control message too long"
 	KindAdmissionRefused    Kind = "admission refused"

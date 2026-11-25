@@ -56,10 +56,19 @@ func (f *File) locked(fn func(records []Record) ([]Record, error)) error {
 	if clock == nil {
 		clock = time.Now
 	}
-	cutoff := clock().Add(-keepFor)
+	now := clock()
+	cutoff := now.Add(-keepFor)
 	kept := out[:0]
 	for _, r := range out {
-		if r.Time.After(cutoff) || r.Outcome == Pending {
+		// A record dated in the future (a clock stepped back when it was
+		// made) is brought to now, so it counts and then ages out rather
+		// than counting until its date comes round.
+		if r.Time.After(now) {
+			r.Time = now
+		}
+		// A pending record counts as refused (I3) until it ages out like
+		// any other.
+		if r.Time.After(cutoff) {
 			kept = append(kept, r)
 		}
 	}
@@ -76,6 +85,13 @@ func (f *File) locked(fn func(records []Record) ([]Record, error)) error {
 		os.Remove(tmp.Name())
 		return err
 	}
+	// The data reaches the disk before the rename, so a crash cannot leave
+	// an empty history in its place.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmp.Name())
 		return err
@@ -84,7 +100,22 @@ func (f *File) locked(fn func(records []Record) ([]Record, error)) error {
 		os.Remove(tmp.Name())
 		return err
 	}
-	return os.Rename(tmp.Name(), f.Path)
+	if err := os.Rename(tmp.Name(), f.Path); err != nil {
+		return err
+	}
+	syncDir(filepath.Dir(f.Path))
+	return nil
+}
+
+// syncDir makes a rename in dir durable where the platform allows it; a
+// directory that cannot be opened or synced (Windows) is left as it is.
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
 }
 
 func (f *File) Reserve(domain, remote string, p Policy, now time.Time) (string, error) {

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/happydave/burrow/internal/admission"
 	"github.com/happydave/burrow/internal/session"
 )
 
@@ -99,9 +100,21 @@ func TestRedialerStopsOnPermanent(t *testing.T) {
 			t.Errorf("%v: returned %v after %d calls, want it after 1", err, got, s.calls)
 		}
 	}
-	s := newScripted(&Error{Stage: StageLink, Kind: KindAdmissionRefused}, nil)
+	s := newScripted(&Error{Stage: StageLink, Kind: KindAdmissionRefused, Err: admission.ErrRefused}, nil)
 	if _, err := s.r.Next(context.Background()); err != nil || s.calls != 2 {
-		t.Fatalf("a guard refusal is retried: %v after %d calls", err, s.calls)
+		t.Fatalf("a policy refusal is retried: %v after %d calls", err, s.calls)
+	}
+	for _, cause := range []error{admission.ErrFileStoreUnsupported, errors.New("corrupt history")} {
+		broken := &Error{Stage: StageLink, Kind: KindAdmissionRefused, Err: cause}
+		s := newScripted(broken, nil)
+		if _, err := s.r.Next(context.Background()); !errors.Is(err, KindAdmissionRefused) || s.calls != 1 {
+			t.Fatalf("a store that cannot work (%v) is retried: %v after %d calls", cause, err, s.calls)
+		}
+	}
+	halt := &Error{Stage: StagePush, Kind: KindHalted}
+	hs := newScripted(halt)
+	if _, err := hs.r.Next(context.Background()); !errors.Is(err, KindHalted) || hs.calls != 1 {
+		t.Fatalf("a HALT during connect: %v after %d calls, want it returned after 1", err, hs.calls)
 	}
 }
 
@@ -151,5 +164,18 @@ func TestRedialerClosesPrevious(t *testing.T) {
 	case <-first.Done():
 	default:
 		t.Fatal("the previous tunnel is still open")
+	}
+}
+
+// TestRedialerStopsAfterHalt: a tunnel the server ended with HALT is not
+// reconnected (spec notes 9).
+func TestRedialerStopsAfterHalt(t *testing.T) {
+	s := newScripted(nil)
+	prev := newTunnel(nil)
+	prev.err = &Error{Stage: StageEstablished, Kind: KindHalted}
+	close(prev.done)
+	s.r.prev = prev
+	if _, err := s.r.Next(context.Background()); !errors.Is(err, KindHalted) || s.calls != 0 {
+		t.Fatalf("after a HALT: %v after %d connects, want the HALT and none", err, s.calls)
 	}
 }

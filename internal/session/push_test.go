@@ -117,3 +117,19 @@ func TestPushTunMTUFloor(t *testing.T) {
 		t.Fatalf("tun-mtu 576: %d, %v", p.TunMTU, err)
 	}
 }
+
+func TestPingRestartZeroIsSet(t *testing.T) {
+	for _, c := range []struct {
+		push string
+		set  bool
+	}{{targetPush, true}, {strings.Replace(targetPush, ",ping-restart 60", ",ping-restart 0", 1), true}, {strings.Replace(targetPush, ",ping-restart 60", "", 1), false}} {
+		opts, err := assemble(t, c.push)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := parsePush(opts)
+		if err != nil || p.PingRestartSet != c.set {
+			t.Errorf("%q: ping-restart set %v, %v; want %v", c.push, p.PingRestartSet, err, c.set)
+		}
+	}
+}

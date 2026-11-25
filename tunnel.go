@@ -14,6 +14,7 @@ import (
 	"github.com/happydave/burrow/internal/admission"
 	"github.com/happydave/burrow/internal/reliable"
 	"github.com/happydave/burrow/internal/session"
+	"github.com/happydave/burrow/internal/wire"
 )
 
 // EventQueue is how many events Events buffers for a slow reader.
@@ -35,9 +36,14 @@ type Pushed struct {
 	PeerID        uint32
 	Cipher        string
 	TunMTU        int // zero when not pushed
+	// Flags are the pushed protocol-flags.
+	Flags []string
 	// Recorded options are accepted and kept but not acted on: routes,
 	// DNS and the like.
 	Recorded []string
+	// Unrecognised options are ones burrow does not know, kept verbatim so
+	// a caller can see what the server asked for.
+	Unrecognised []string
 }
 
 // Stats counts traffic and drops.
@@ -99,6 +105,7 @@ type Tunnel struct {
 	sess   conn
 	stack  *stack // nil in raw mode
 	remote netip.AddrPort
+	mtu    int
 	// established and ended bound the tunnel's life, for the Redialer's
 	// flapping rule; ended is set before Done closes.
 	established, ended time.Time
@@ -122,7 +129,8 @@ type Tunnel struct {
 // Connect connects to the first of cfg.Remotes that answers and returns an
 // established tunnel. It moves to the next remote only while no server has
 // answered; any answered failure is returned as it is. Its errors are
-// *Error, with the stage and kind of the failure. The admission guard is
+// *Error, with the stage and kind of the failure, except that an invalid
+// Config is a plain error before anything is sent. The admission guard is
 // always on: without a store, attempts are counted in this process's
 // memory, in one domain for all of the configuration's remotes.
 func Connect(ctx context.Context, cfg Config) (*Tunnel, error) {
@@ -156,9 +164,17 @@ func connect(ctx context.Context, cfg Config, adjust func(*dialer)) (*Tunnel, er
 		return nil, err
 	}
 	t.remote = remote
-	mtu := 0
-	if !cfg.RawPackets {
-		mtu = stackMTU(cfg, sess.Push.TunMTU, remote.Addr().Is6())
+	t.mtu = stackMTU(cfg, sess.Push.TunMTU, remote.Addr().Is6())
+	if t.mtu < minMTU {
+		_ = sess.Close()
+		err := &Error{Stage: StagePush, Kind: KindUnsupportedPush,
+			Err: fmt.Errorf("tun-mtu and mssfix leave an MTU of %d, below %d", t.mtu, minMTU)}
+		t.warn("connect failed", err)
+		return nil, err
+	}
+	mtu := t.mtu
+	if cfg.RawPackets {
+		mtu = 0
 	}
 	t.statsEvery = cfg.StatsInterval
 	if t.statsEvery == 0 {
@@ -184,8 +200,15 @@ func stackMTU(cfg Config, pushedTunMTU int, ipv6Outer bool) int {
 	if mssfix == 0 {
 		mssfix, payload = DefaultMSSFix, false
 	}
-	return linkMTU(tun, mssfix, payload, ipv6Outer)
+	return min(linkMTU(tun, mssfix, payload, ipv6Outer), maxMTU)
 }
+
+// The MTU's bounds: IPv4's minimum, and the largest inner packet whose
+// sealed datagram fits the receive bound (spec notes 18.4).
+const (
+	minMTU = 576
+	maxMTU = wire.MaxDatagram - dataOverhead
+)
 
 func newTunnel(log *slog.Logger) *Tunnel {
 	return &Tunnel{log: log, events: make(chan Event, EventQueue),
@@ -211,7 +234,8 @@ func (t *Tunnel) start(c conn, p session.Push, dns []netip.Addr, mtu int) error 
 
 func pushedFrom(p session.Push) Pushed {
 	return Pushed{Local: p.Local, Remote: p.Remote, Ping: p.Ping, PingRestart: p.PingRestart,
-		PeerID: p.PeerID, Cipher: p.Cipher, TunMTU: p.TunMTU, Recorded: slices.Clone(p.Recorded)}
+		PeerID: p.PeerID, Cipher: p.Cipher, TunMTU: p.TunMTU, Flags: slices.Clone(p.Flags),
+		Recorded: slices.Clone(p.Recorded), Unrecognised: slices.Clone(p.Unrecognised)}
 }
 
 // DefaultStatsInterval is how often a tunnel sends a counters event.
@@ -352,10 +376,18 @@ func (t *Tunnel) ReadPacket(ctx context.Context) ([]byte, error) {
 	return t.sess.ReadPacket(ctx)
 }
 
-// WritePacket sends one IP packet to the server. Raw mode only.
+// MTU is the largest IP packet the tunnel carries: the network stack's MTU,
+// or in raw mode the bound WritePacket holds packets to.
+func (t *Tunnel) MTU() int { return t.mtu }
+
+// WritePacket sends one IP packet to the server. Raw mode only; a packet
+// over MTU is refused.
 func (t *Tunnel) WritePacket(ip []byte) error {
 	if t.stack != nil {
 		return ErrStackMode
+	}
+	if t.mtu > 0 && len(ip) > t.mtu {
+		return fmt.Errorf("burrow: a %d-byte packet is over the tunnel MTU of %d", len(ip), t.mtu)
 	}
 	select {
 	case <-t.done:

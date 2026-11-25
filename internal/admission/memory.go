@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 )
@@ -23,6 +24,10 @@ func newID() string {
 func (m *Memory) Reserve(domain, remote string, p Policy, now time.Time) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// Records older than any window are dropped, as the file store does,
+	// so a long-lived process's history stays bounded.
+	cutoff := now.Add(-keepFor)
+	m.records = slices.DeleteFunc(m.records, func(r Record) bool { return r.Time.Before(cutoff) })
 	if !Allowed(filter(m.records, domain), p, now) {
 		return "", fmt.Errorf("%w: domain %s", ErrRefused, domain)
 	}

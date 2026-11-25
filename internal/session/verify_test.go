@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
@@ -119,5 +120,56 @@ func TestTLSConfigAlwaysVerifies(t *testing.T) {
 	}
 	if cfg.VerifyPeerCertificate != nil || cfg.ServerName != "" {
 		t.Error("unexpected extra verification or a server name")
+	}
+}
+
+// intermediate issues a CA certificate from c, with the given EKUs (none
+// means unrestricted).
+func (c ca) intermediate(t *testing.T, ekus []x509.ExtKeyUsage) ca {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(9), Subject: pkix.Name{CommonName: "intermediate"},
+		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(24 * time.Hour), IsCA: true,
+		BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign, ExtKeyUsage: ekus}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.cert, &key.PublicKey, c.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ic, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ca{ic, key}
+}
+
+// TestVerifyIntermediates (review finding 17): a leaf under an intermediate
+// the server supplies verifies; without the intermediate, or under one
+// whose EKUs leave out serverAuth, it does not. A nil pool is refused
+// (finding 25).
+func TestVerifyIntermediates(t *testing.T) {
+	root := newCA(t, "root")
+	inter := root.intermediate(t, nil)
+	leaf := inter.leaf(t, nil)
+	if err := verifyServer([]*x509.Certificate{leaf, inter.cert}, root.pool(), now); err != nil {
+		t.Fatalf("a leaf with its intermediate: %v", err)
+	}
+	if err := verifyServer([]*x509.Certificate{leaf}, root.pool(), now); !errors.Is(err, errCertRejected) {
+		t.Fatalf("a leaf without its intermediate: %v", err)
+	}
+	clientOnly := root.intermediate(t, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth})
+	l2 := clientOnly.leaf(t, nil)
+	if err := verifyServer([]*x509.Certificate{l2, clientOnly.cert}, root.pool(), now); !errors.Is(err, errCertRejected) {
+		t.Fatalf("an intermediate restricted to clientAuth: %v", err)
+	}
+	// A nil pool would fall back to the system roots; the refusal must be
+	// the explicit one, not a chain that happens not to verify.
+	if err := verifyServer([]*x509.Certificate{leaf, inter.cert}, nil, now); !errors.Is(err, errCertRejected) || !strings.Contains(err.Error(), "no CA pool") {
+		t.Fatalf("a nil pool: %v, want the no-CA-pool refusal", err)
+	}
+	if cfg := tlsConfig(root.pool(), tls.Certificate{}, func() time.Time { return now }); cfg.MinVersion != tls.VersionTLS13 {
+		t.Fatalf("minimum TLS version %x, want 1.3 (finding 6)", cfg.MinVersion)
 	}
 }

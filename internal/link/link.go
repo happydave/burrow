@@ -59,9 +59,7 @@ func (l *Link) read() {
 	for {
 		n, err := l.conn.Read(buf)
 		if err != nil {
-			// A connected UDP socket reports a port-unreachable reply as
-			// ECONNREFUSED on the next read; the remote may come back.
-			if errors.Is(err, syscall.ECONNREFUSED) {
+			if transient(err) {
 				continue
 			}
 			if tooBig(err) {
@@ -83,6 +81,22 @@ func (l *Link) read() {
 			l.queueFull.Add(1)
 		}
 	}
+}
+
+// transient reports whether a read error is a network condition the
+// remote may recover from: a connected UDP socket reports an ICMP error as
+// a failed read (port unreachable as ECONNREFUSED; host and network
+// unreachable on macOS and the BSDs, and on Linux for some firewall
+// rejects). The reader goes on; the keepalive notices a remote that stays
+// gone.
+func transient(err error) bool {
+	for _, e := range []error{syscall.ECONNREFUSED, syscall.EHOSTUNREACH, syscall.ENETUNREACH,
+		syscall.EHOSTDOWN, syscall.EMSGSIZE, syscall.ECONNRESET} {
+		if errors.Is(err, e) {
+			return true
+		}
+	}
+	return false
 }
 
 // Packets delivers received datagrams. It is never closed; Done reports the

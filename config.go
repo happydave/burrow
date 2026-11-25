@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -40,9 +41,9 @@ type Config struct {
 	// (reneg-sec); zero means an hour, negative leaves renegotiation to the
 	// server.
 	RenegInterval time.Duration
-	// ConnectRetry and ConnectRetryMax are the Redialer's backoff base and
+	// ConnectRetry and ConnectRetryCap are the Redialer's backoff base and
 	// cap; zero means 1 s and 300 s.
-	ConnectRetry, ConnectRetryMax time.Duration
+	ConnectRetry, ConnectRetryCap time.Duration
 	// Dialer opens the UDP socket; nil means a net.Dialer.
 	Dialer Dialer
 	// AdmissionStore keeps attempt history for the admission guard. Nil
@@ -112,9 +113,11 @@ func (c Config) validate() error {
 		return errors.New("burrow: Config.Remotes is empty")
 	case c.RootCAs == nil:
 		return errors.New("burrow: Config.RootCAs is nil; the server's certificate cannot be verified")
+	case c.MSSFix > 0 && stackMTU(c, 0, false) < minMTU:
+		return fmt.Errorf("burrow: Config.MSSFix %d leaves an MTU of %d, below %d", c.MSSFix, stackMTU(c, 0, false), minMTU)
 	case c.TunMTU != 0 && (c.TunMTU < 576 || c.TunMTU > 65535):
 		return errors.New("burrow: Config.TunMTU must be from 576 to 65535")
-	case c.PushTimeout < 0 || c.HandshakeWindow < 0 || c.ConnectTimeout < 0 || c.ConnectRetry < 0 || c.ConnectRetryMax < 0:
+	case c.PushTimeout < 0 || c.HandshakeWindow < 0 || c.ConnectTimeout < 0 || c.ConnectRetry < 0 || c.ConnectRetryCap < 0:
 		return errors.New("burrow: negative timeout")
 	}
 	for _, r := range c.Remotes {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"time"
 
@@ -105,6 +106,11 @@ type State struct {
 	readBuf       []byte
 	resetReceived bool
 	pendingAcks   []uint32
+	// peerAckedOne is set once the peer has ACKed one of our packets with
+	// ID 1 or higher. Until then every control packet repeats the ACK of
+	// the peer's packet 0 (spec notes 4.4): a server that keeps no state
+	// until the third packet matches it only by that ACK.
+	peerAckedOne bool
 
 	err   error
 	stats Stats
@@ -201,6 +207,9 @@ func (s *State) Receive(c wire.Control) {
 	}
 	s.stats.Received++
 	for _, a := range c.Acks {
+		if a >= 1 {
+			s.peerAckedOne = true
+		}
 		if _, ok := s.flight[a]; ok {
 			delete(s.flight, a)
 		} else if uint64(a) >= s.nextSend {
@@ -300,10 +309,10 @@ func (s *State) Poll(now time.Time) [][]byte {
 		}
 		f.lastSent = now
 		s.stats.Sent++
-		out = append(out, s.encode(wire.Control{Op: f.op, PacketID: id, Payload: f.payload}, wire.MaxAcksPiggyback))
+		out = append(out, s.encode(wire.Control{Op: f.op, PacketID: id, Payload: f.payload}, wire.MaxAcksPiggyback, f.op == wire.ControlV1))
 	}
 	for len(s.pendingAcks) > 0 && s.peerKnown {
-		out = append(out, s.encode(wire.Control{Op: wire.AckV1}, wire.MaxAcksAck))
+		out = append(out, s.encode(wire.Control{Op: wire.AckV1}, wire.MaxAcksAck, false))
 	}
 	return out
 }
@@ -332,11 +341,16 @@ func (s *State) fill() {
 	}
 }
 
-func (s *State) encode(c wire.Control, maxAcks int) []byte {
+func (s *State) encode(c wire.Control, maxAcks int, repeatFirst bool) []byte {
 	c.KeyID = s.cfg.KeyID
 	c.Session = s.cfg.Own
 	if s.peerKnown {
-		c.Acks = s.takeAcks(maxAcks)
+		if repeatFirst && s.resetReceived && !s.peerAckedOne && !slices.Contains(s.pendingAcks, 0) {
+			// The repeat takes one slot; the owed ACKs keep their order.
+			c.Acks = append([]uint32{0}, s.takeAcks(maxAcks-1)...)
+		} else {
+			c.Acks = s.takeAcks(maxAcks)
+		}
 		c.PeerSession = s.peer
 	}
 	b, err := wire.AppendControl(nil, c)

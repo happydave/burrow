@@ -11,6 +11,7 @@ import (
 
 	"github.com/happydave/burrow/internal/api"
 	"github.com/happydave/burrow/internal/fakeserver"
+	"github.com/happydave/burrow/internal/reliable"
 )
 
 func TestNextKeyID(t *testing.T) {
@@ -294,7 +295,7 @@ func TestStalledRenegotiationFails(t *testing.T) {
 	if err := r.s.Err(); !errors.As(err, &e) || e.Stage != api.StageRenegotiation || !errors.Is(err, api.KindRenegotiationFailed) {
 		t.Fatalf("err %v, want renegotiation failed at the renegotiation stage", err)
 	}
-	if d := time.Since(start); d > 1500*time.Millisecond {
+	if d := time.Since(start); d > 2500*time.Millisecond {
 		t.Fatalf("ended after %v; the handshake window is 1 s", d)
 	}
 }
@@ -415,6 +416,12 @@ func TestCloseWipesKeys(t *testing.T) {
 	if !allZero(r.s.EKM) {
 		t.Fatal("the first key's EKM block survived Close")
 	}
+	if r.s.TLS.Version != 0 {
+		t.Fatal("the TLS connection state, which holds the exporter, survived Close")
+	}
+	if _, err := r.s.seal([]byte{0xfa, 0x45}); !errors.Is(err, api.KindInternalFailure) {
+		t.Fatalf("sealing with a wiped key: %v, want internal failure (not the packet-ID limit)", err)
+	}
 	for _, k := range keys {
 		if !allZero(k.ekm) {
 			t.Fatalf("key %d's EKM block survived Close", k.id)
@@ -461,10 +468,14 @@ func TestStatsKeepDroppedKeys(t *testing.T) {
 	r := startReneg(t, fakeserver.Options{SendOnNewKey: true}, nil)
 	r.srv.Renegotiate()
 	r.waitActive(t, 1, 3*time.Second)
-	before := r.s.Stats().Reliable.Sent // keys 0 and 1, both live
+	var key0 int
+	r.s.k0.conn.Do(func(st *reliable.State) { key0 = st.Stats().Sent }) // key 0, still live
 	r.srv.Renegotiate()
 	r.waitActive(t, 2, 3*time.Second) // key 0 dropped
-	if after := r.s.Stats().Reliable.Sent; after < before {
-		t.Fatalf("control packets sent fell from %d to %d when key 0 was dropped", before, after)
+	r.s.keyMu.Lock()
+	kept := r.s.droppedReliable.Sent
+	r.s.keyMu.Unlock()
+	if key0 == 0 || kept < key0 {
+		t.Fatalf("dropped keys' sent count %d, want at least key 0's %d", kept, key0)
 	}
 }

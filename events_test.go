@@ -2,6 +2,8 @@ package burrow
 
 import (
 	"context"
+	"crypto/x509"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -63,5 +65,48 @@ func TestCountersAndEndedEvents(t *testing.T) {
 		if e := <-tn.Events(); e.Kind == EventEnded {
 			t.Fatal("a second ended event")
 		}
+	}
+}
+
+// TestMTUBounds (review finding 8): the stack MTU is capped so a sealed
+// packet fits the receive bound, and an mssfix that leaves it under 576 is
+// refused before anything is sent.
+func TestMTUBounds(t *testing.T) {
+	if got := stackMTU(Config{MSSFix: -1}, 9000, false); got != maxMTU {
+		t.Fatalf("pushed tun-mtu 9000 with mssfix off: %d, want the cap %d", got, maxMTU)
+	}
+	for _, c := range []Config{{MSSFix: 20}, {MSSFix: 60}, {MSSFix: 600, MSSFixPayload: true}} {
+		c.Remotes, c.RootCAs = []string{"192.0.2.1:1194"}, x509.NewCertPool()
+		if err := c.validate(); err == nil || !strings.Contains(err.Error(), "MSSFix") {
+			t.Errorf("mssfix %d (payload %v): %v, want a refusal", c.MSSFix, c.MSSFixPayload, err)
+		}
+	}
+}
+
+// TestRawModeMTU (finding 15) and the pushed flags (finding 20), through
+// Connect to the fake server.
+func TestRawModeMTU(t *testing.T) {
+	srv := fakeserver.Start(t, fakeserver.Options{Push: fakeserver.Push})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tn, err := Connect(ctx, Config{Remotes: []string{srv.Addr()}, RootCAs: srv.Pool, AdmissionStore: NewMemoryStore(),
+		RawPackets: true, HandshakeWindow: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tn.Close()
+	if tn.MTU() != 1439 {
+		t.Fatalf("MTU %d, want 1439 (1492 mtu over IPv4)", tn.MTU())
+	}
+	big := make([]byte, tn.MTU()+1)
+	big[0] = 0x45
+	if err := tn.WritePacket(big); err == nil {
+		t.Fatal("a packet over the MTU was sent")
+	}
+	if err := tn.WritePacket(big[:tn.MTU()]); err != nil {
+		t.Fatalf("a packet at the MTU: %v", err)
+	}
+	if p := tn.Pushed(); !slices.Contains(p.Flags, "cc-exit") {
+		t.Fatalf("pushed flags %q, want cc-exit among them", p.Flags)
 	}
 }

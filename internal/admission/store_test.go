@@ -1,6 +1,7 @@
 package admission
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -165,5 +166,41 @@ func TestFileStorePrunesByItsClock(t *testing.T) {
 		if rs, _ := later.Records("d"); len(rs) != c.kept {
 			t.Errorf("a refused record %v old: %d kept, want %d", c.age, len(rs), c.kept)
 		}
+	}
+}
+
+// TestFileStoreClampsAndPrunes (review finding 14): a record dated after
+// the store's clock is brought to it, and a pending record ages out like
+// any other.
+func TestFileStoreClampsAndPrunes(t *testing.T) {
+	needFileLock(t)
+	path := filepath.Join(t.TempDir(), "history.json")
+	future := []Record{{ID: "f", Domain: "d", Time: now.Add(30 * 24 * time.Hour), Outcome: Refused},
+		{ID: "p", Domain: "d", Time: now.Add(-25 * time.Hour), Outcome: Pending}}
+	data, _ := json.Marshal(future)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &File{Path: path, Now: fixedNow}
+	if _, err := s.Reserve("other", "r", DefaultPolicy, now); err != nil { // a write
+		t.Fatal(err)
+	}
+	rs, _ := s.Records("d")
+	if len(rs) != 1 || rs[0].ID != "f" || !rs[0].Time.Equal(now) {
+		t.Fatalf("records %+v, want only the future record, brought to now", rs)
+	}
+}
+
+// TestMemoryStorePrunes (finding 22).
+func TestMemoryStorePrunes(t *testing.T) {
+	m := &Memory{}
+	if _, err := m.Reserve("d", "r", DefaultPolicy, now.Add(-25*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Reserve("d", "r", DefaultPolicy, now); err != nil {
+		t.Fatal(err)
+	}
+	if rs, _ := m.Records("d"); len(rs) != 1 {
+		t.Fatalf("%d records, want the 25-hour-old one pruned", len(rs))
 	}
 }

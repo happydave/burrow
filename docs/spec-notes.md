@@ -202,7 +202,9 @@ challenge the client must echo in the third packet, keeping no state before that
 "Setting up connection with cookie support"; D §10.4.3, last paragraphs] *Supported.* Consequence,
 *Hypothesis*: until the server has ACKed one of burrow's packets with ID ≥ 1, every packet burrow
 sends, retransmissions included, carries the ACK of server packet 0 and the server's session ID, so
-whichever copy arrives first lets the server create its state.
+whichever copy arrives first lets the server create its state. burrow does this: until the server
+ACKs one of its packets above 0, every CONTROL_V1 it sends, retransmissions included, repeats the ACK
+of the server's packet 0 (added after an independent review found it missing).
 
 **4.5 Failover boundary.** "Answered" means a valid CONTROL_HARD_RESET_SERVER_V2 arrived (design,
 Failover). The man page's own client moves to the next remote after `--server-poll-timeout` (default

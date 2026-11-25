@@ -14,10 +14,13 @@ type Push struct {
 	Local, Remote netip.Addr // ifconfig under topology p2p
 	Ping          time.Duration
 	PingRestart   time.Duration
-	PeerID        uint32
-	Cipher        string
-	Flags         []string // protocol-flags
-	TunMTU        int      // zero when not pushed
+	// PingRestartSet tells a pushed ping-restart 0, which disables the
+	// expiry, from none pushed, which leaves the 120 s default.
+	PingRestartSet bool
+	PeerID         uint32
+	Cipher         string
+	Flags          []string // protocol-flags
+	TunMTU         int      // zero when not pushed
 	// Recorded holds options burrow recognises and keeps for the caller but
 	// does not act on (routes, DNS), verbatim.
 	Recorded []string
@@ -107,7 +110,7 @@ func parsePush(options []string) (Push, error) {
 			case "ping":
 				p.Ping = time.Duration(n) * time.Second
 			case "ping-restart":
-				p.PingRestart = time.Duration(n) * time.Second
+				p.PingRestart, p.PingRestartSet = time.Duration(n)*time.Second, true
 			default:
 				if n < 576 {
 					return p, bad("tun-mtu below 576, the IPv4 minimum")

@@ -50,7 +50,7 @@ func TestServerEnd(t *testing.T) {
 		{"AUTH_FAILED", endAuthFailed, true, ""},
 		{"AUTH_FAILED,cipher negotiation failed", endAuthFailed, true, "cipher negotiation failed"},
 		{"RESTART,[N]server restarting", endClosedByServer, true, ""},
-		{"HALT", endClosedByServer, true, ""},
+		{"HALT", endHalted, true, ""},
 		{"EXIT", endClosedByServer, true, ""},
 		{"INFO,something", 0, false, ""},
 		{"NEW_THING,1", 0, false, ""},

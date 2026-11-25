@@ -6,6 +6,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/happydave/burrow"
@@ -22,8 +24,13 @@ func ExampleLoadConfig() {
 		log.Printf("ignored %s (line %d): no meaning without a device", ig.Directive, ig.Line)
 	}
 	// Attempts from several processes on one host share a file store, so the
-	// admission guard counts all of them.
-	cfg.AdmissionStore = burrow.NewFileStore("/var/tmp/burrow-attempts.json")
+	// admission guard counts all of them. It lives in this user's own cache
+	// directory, where no other user can create its files first.
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		log.Fatal(err)
+	}
+	cfg.AdmissionStore = burrow.NewFileStore(filepath.Join(dir, "burrow-attempts.json"))
 
 	r := burrow.NewRedialer(cfg)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)

@@ -18,7 +18,11 @@ if err != nil {
 for _, ig := range ignored {
 	log.Printf("ignored %s (line %d): no meaning without a device", ig.Directive, ig.Line)
 }
-cfg.AdmissionStore = burrow.NewFileStore("/var/tmp/burrow-attempts.json")
+dir, err := os.UserCacheDir() // this user's own: no one else can create the file first
+if err != nil {
+	log.Fatal(err)
+}
+cfg.AdmissionStore = burrow.NewFileStore(filepath.Join(dir, "burrow-attempts.json"))
 
 r := burrow.NewRedialer(cfg)
 tn, err := r.Next(ctx)
@@ -40,8 +44,8 @@ stack. Its `Events`, `Stats`, `Done` and `Err` report what the tunnel is doing.
 
 - **Transport:** UDP, to an ordered list of remotes. burrow moves to the next remote only while no
   server has answered, and tries each address of a host name in turn.
-- **Control channel:** plain control packets (no `tls-auth` or `tls-crypt`), with TLS 1.3 over Go's
-  `crypto/tls` and a client certificate.
+- **Control channel:** plain control packets (no `tls-auth` or `tls-crypt`), with TLS 1.3 (only)
+  over Go's `crypto/tls` and a client certificate.
 - **Server check:** the certificate must chain to the configured CAs and carry the server-auth
   extended key usage, as `remote-cert-tls server` asks. There is no host-name check, as in OpenVPN.
 - **Keys:** key method 2, with data keys from the TLS exporter.
@@ -102,8 +106,10 @@ systems only; elsewhere it refuses every attempt with an error saying so.
 - `Config.InsecureKeyLog` writes every TLS session's secrets in the NSS key-log format, for
   debugging burrow's own sessions. Anyone with that file can decrypt captured control traffic. It is
   off unless set.
-- Key material is zeroed when a key is dropped and when the tunnel closes, as far as Go allows. The
-  AES implementation's expanded keys are outside burrow's reach, so this is best effort.
+- Key material burrow holds is zeroed when a key is dropped and when the tunnel closes: the exporter
+  blocks, the implicit IVs and the kept TLS connection state. The AES implementation's expanded keys
+  and the secrets `crypto/tls` keeps inside its connections are outside burrow's reach, so this is
+  best effort.
 - Every parser of network or file input has a fuzz target.
 
 ## Platforms

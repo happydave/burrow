@@ -36,6 +36,7 @@ const (
 	KindAuthFailed          = api.KindAuthFailed
 	KindUnsupportedPush     = api.KindUnsupportedPush
 	KindClosedByServer      = api.KindClosedByServer
+	KindHalted              = api.KindHalted
 	KindCanceled            = api.KindCanceled
 	KindMessageTooLong      = api.KindMessageTooLong
 	KindAdmissionRefused    = api.KindAdmissionRefused

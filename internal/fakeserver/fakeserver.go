@@ -43,6 +43,8 @@ type Options struct {
 	// BadCertOnRenegotiation presents a leaf without the serverAuth EKU on
 	// every renegotiated key.
 	BadCertOnRenegotiation bool
+	// TLS12Only offers TLS 1.2 and nothing newer.
+	TLS12Only bool
 }
 
 // Push is a PUSH_REPLY in the target profile's shape (spec notes O9).
@@ -436,7 +438,11 @@ func (k *skey) session() {
 	if k.id != 0 && opts.BadCertOnRenegotiation {
 		cert = k.c.s.badCert
 	}
-	tc := tls.Server(k.conn, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13})
+	tcfg := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13}
+	if opts.TLS12Only {
+		tcfg.MinVersion, tcfg.MaxVersion = tls.VersionTLS12, tls.VersionTLS12
+	}
+	tc := tls.Server(k.conn, tcfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {

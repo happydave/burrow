@@ -190,6 +190,11 @@ func parseOVPN(data []byte) (*profile, error) {
 	inBlocks, outside := 0, 0
 	blockRemotes := map[int]int{}
 	for _, d := range ds {
+		if d.name == "dev" && (len(d.args) != 1 || !strings.HasPrefix(d.args[0], "tun")) {
+			// dev tap carries Ethernet frames, a different data plane;
+			// only the name of a tun device is ignorable.
+			return nil, d.errorf("%q: only a tun device is supported", strings.Join(d.args, " "))
+		}
 		if ignoredDirectives[d.name] {
 			if d.connection != 0 {
 				return nil, d.errorf("not supported inside <connection>")
@@ -302,6 +307,11 @@ func parseOVPN(data []byte) (*profile, error) {
 			default:
 				return nil, d.errorf("%q is not supported; use mtu or no keyword", d.args[1])
 			}
+			if n > 0 {
+				if m := linkMTU(65535, n, p.mssfixPayload, false); m < minMTU {
+					return nil, d.errorf("%d leaves an MTU of %d, below %d", n, m, minMTU)
+				}
+			}
 		case "connect-timeout":
 			if err := d.want(1, 1); err != nil {
 				return nil, err
@@ -391,7 +401,7 @@ func LoadConfig(path string) (Config, []Ignored, error) {
 	return Config{
 		Remotes: p.remotes, RootCAs: pool, Certificate: cert,
 		ResolveRetry: p.resolveRetry, TunMTU: p.tunMTU, MSSFix: p.mssfix, MSSFixPayload: p.mssfixPayload,
-		ConnectTimeout: p.connectTimeout, ConnectRetry: p.connectRetry, ConnectRetryMax: p.connectRetryM,
+		ConnectTimeout: p.connectTimeout, ConnectRetry: p.connectRetry, ConnectRetryCap: p.connectRetryM,
 	}, p.ignored, nil
 }
 

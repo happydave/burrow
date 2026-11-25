@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"testing"
 	"time"
 
@@ -144,11 +145,13 @@ func TestPiggybackedAndStandaloneAcks(t *testing.T) {
 		t.Fatalf("want a CONTROL_V1 and an ACK_V1, got %d packets", len(out))
 	}
 	a, b := decode(t, out[0]), decode(t, out[1])
-	if a.Op != wire.ControlV1 || len(a.Acks) != 4 {
-		t.Fatalf("first packet %+v, want CONTROL_V1 with 4 ACKs", a)
+	// The server has ACKed none of our packets above 0, so the CONTROL_V1
+	// repeats the ACK of its reset in one of its 4 slots (spec notes 4.4).
+	if a.Op != wire.ControlV1 || len(a.Acks) != 4 || a.Acks[0] != 0 {
+		t.Fatalf("first packet %+v, want CONTROL_V1 with ACK 0 and 3 more", a)
 	}
-	if b.Op != wire.AckV1 || len(b.Acks) != 2 {
-		t.Fatalf("second packet %+v, want ACK_V1 with 2 ACKs", b)
+	if b.Op != wire.AckV1 || len(b.Acks) != 3 {
+		t.Fatalf("second packet %+v, want ACK_V1 with the other 3 ACKs", b)
 	}
 	if a.PeerSession != sidS || b.PeerSession != sidS {
 		t.Error("ACKs must carry the server's session ID as peer")
@@ -407,4 +410,37 @@ func FuzzReliableInput(f *testing.F) {
 			}
 		}
 	})
+}
+
+// TestFirstAckRepeatsUntilAnswered: until the server ACKs one of burrow's
+// packets above 0, every CONTROL_V1, retransmissions included, carries the
+// ACK of the server's reset, so a server that keeps no state until the
+// third packet can still match them if the first ACK_V1 was lost (spec
+// notes 4.4). It stops once the server ACKs packet 1.
+func TestFirstAckRepeatsUntilAnswered(t *testing.T) {
+	s := learned(t)                                                             // the lone ACK_V1 of the server's reset has gone
+	if _, err := s.Write(make([]byte, wire.MaxControlPayload+10)); err != nil { // packets 1 and 2
+		t.Fatal(err)
+	}
+	check := func(when string, out [][]byte, want bool) {
+		t.Helper()
+		n := 0
+		for _, b := range out {
+			c := decode(t, b)
+			if c.Op != wire.ControlV1 {
+				continue
+			}
+			n++
+			if got := slices.Contains(c.Acks, 0); got != want || (len(c.Acks) > 0 && c.PeerSession != sidS) {
+				t.Fatalf("%s: packet %d acks %v (peer %x), want ACK 0 %v", when, c.PacketID, c.Acks, c.PeerSession, want)
+			}
+		}
+		if n == 0 {
+			t.Fatalf("%s: no CONTROL_V1 sent", when)
+		}
+	}
+	check("first send", s.Poll(t0), true)
+	check("retransmission", s.Poll(t0.Add(InitialRetransmit)), true)
+	s.Receive(wire.Control{Op: wire.AckV1, Session: sidS, Acks: []uint32{1}, PeerSession: sidC})
+	check("after the server ACKed packet 1", s.Poll(t0.Add(time.Hour)), false)
 }

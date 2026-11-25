@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -92,6 +93,10 @@ type Session struct {
 	msgs       chan message
 	seenLink   link.Stats // the driver's last look at the link's drops
 
+	dropEventsMu     sync.Mutex
+	dropEventsSecond int64
+	dropEvents       map[string]int
+
 	// Set once Connect returns.
 	Push Push
 	EKM  []byte
@@ -121,7 +126,8 @@ type Session struct {
 	droppedReliable                                     reliable.Stats // dropped keys' counts; guarded by keyMu
 
 	received                                                        chan []byte
-	lastAuth                                                        atomic.Int64 // unix nanoseconds of the last authenticated data packet
+	base                                                            time.Time    // the clock at connect; lastAuth and lastSend count from it
+	lastAuth                                                        atomic.Int64 // since base, the last authenticated data packet
 	lastSend                                                        atomic.Int64
 	dataOpened, dataAuthFailed, dataReplay, unframed, recvQueueFull atomic.Int64
 	pingsSent, pingsReceived                                        atomic.Int64
@@ -217,7 +223,8 @@ func connect(ctx context.Context, cfg Config) (*Session, error) {
 	s := &Session{cfg: cfg, kick: make(chan struct{}, 1), stop: make(chan struct{}),
 		driverDone: make(chan struct{}),
 		msgs:       make(chan message, 16), ended: make(chan struct{}), received: make(chan []byte, receiveQueue),
-		sched: schedule{renegInterval: cfg.RenegInterval, promotion: cfg.promotion, tranWindow: cfg.tranWindow, handWindow: cfg.HandshakeWindow}}
+		sched: schedule{renegInterval: cfg.RenegInterval, promotion: cfg.promotion, tranWindow: cfg.tranWindow, handWindow: cfg.HandshakeWindow},
+		base:  cfg.Clock.Now()}
 
 	s.event(api.Event{Kind: api.EventStageEntered, Stage: api.StageLink})
 	lk, err := link.Dial(ctx, cfg.Dialer, cfg.Remote)
@@ -236,6 +243,11 @@ func connect(ctx context.Context, cfg Config) (*Session, error) {
 	s.wake()
 
 	if err := s.handshake(ctx); err != nil {
+		// A session that ended on its own (its link failed, say) reports
+		// that cause, not the step it interrupted.
+		if e := s.Err(); e != nil {
+			err = e
+		}
 		s.teardown()
 		return nil, err
 	}
@@ -254,12 +266,18 @@ func (s *Session) drive() {
 	defer close(s.driverDone)
 	timer := s.cfg.Clock.NewTimer(time.Hour)
 	defer timer.Stop()
+	linkDone := s.lk.Done()
 	for {
 		select {
 		case <-s.stop:
 			return
 		case b := <-s.lk.Packets():
 			s.route(b)
+		case <-linkDone:
+			// The reader has stopped on an error it cannot get past: the
+			// session cannot receive, so it ends with the cause.
+			linkDone = nil
+			s.end(fail(s.currentStage(), api.KindUnreachable, fmt.Errorf("link: %w", s.lk.Err())))
 		case <-s.kick:
 		case <-timer.C():
 		}
@@ -295,15 +313,18 @@ func (s *Session) drive() {
 			}
 		}
 		s.linkDrops()
-		if s.established.Load() {
+		// After the session has ended, nothing is scheduled: a keepalive
+		// that has expired would otherwise rearm a zero wait for ever.
+		running := s.established.Load() && !s.hasEnded()
+		if running {
 			wait = min(wait, s.applySchedule(now))
 		}
-		if s.established.Load() {
+		if running {
 			restart := s.Push.PingRestart
-			if restart == 0 {
+			if !s.Push.PingRestartSet {
 				restart = defaultPingRestart
 			}
-			ping, expired, at := keepalive(now, time.Unix(0, s.lastSend.Load()), time.Unix(0, s.lastAuth.Load()), s.Push.Ping, restart)
+			ping, expired, at := keepalive(now, s.stamp(&s.lastSend), s.stamp(&s.lastAuth), s.Push.Ping, restart)
 			if expired {
 				s.end(fail(api.StageEstablished, api.KindKeepaliveTimeout, fmt.Errorf("no authenticated data packet for %v", restart)))
 			} else if ping {
@@ -315,6 +336,14 @@ func (s *Session) drive() {
 		}
 		timer.Reset(wait)
 	}
+}
+
+// fromServer reports whether a control packet carries this session's IDs:
+// the server's session ID, and burrow's as the peer when it ACKs anything
+// (spec notes 2.5). Nothing acts on a packet before this holds; the
+// reliability state checks it again for the packets it takes.
+func (s *Session) fromServer(c wire.Control) bool {
+	return c.Session == s.serverSession && (len(c.Acks) == 0 || c.PeerSession == s.own)
 }
 
 // currentStage is the stage events report from the driver: established
@@ -354,7 +383,7 @@ func (s *Session) route(b []byte) {
 		}
 		s.keyMu.Lock()
 		k := s.findLocked(key)
-		if k == nil && op == wire.SoftResetV1 && s.established.Load() && softResetAction(key, s.viewsLocked()) == resetRespond {
+		if k == nil && op == wire.SoftResetV1 && s.established.Load() && s.fromServer(c) && softResetAction(key, s.viewsLocked()) == resetRespond {
 			k = s.startNegotiationLocked(key, false)
 		}
 		s.keyMu.Unlock()
@@ -363,9 +392,11 @@ func (s *Session) route(b []byte) {
 			if op == wire.SoftResetV1 {
 				s.softResetsDropped.Add(1)
 			}
-			s.event(api.Event{Kind: api.EventPacketDropped, Stage: api.StageEstablished, KeyID: key, PacketID: c.PacketID,
-				Reason: fmt.Sprintf("other key: op %d key %d session %x peer %x packet %d acks %v payload %d bytes",
-					c.Op, c.KeyID, c.Session, c.PeerSession, c.PacketID, c.Acks, len(c.Payload))})
+			if s.allowDropEvent("other key") {
+				s.event(api.Event{Kind: api.EventPacketDropped, Stage: api.StageEstablished, KeyID: key, PacketID: c.PacketID,
+					Reason: fmt.Sprintf("other key: op %d key %d session %x peer %x packet %d acks %v payload %d bytes",
+						c.Op, c.KeyID, c.Session, c.PeerSession, c.PacketID, c.Acks, len(c.Payload))})
+			}
 			return
 		}
 		k.conn.Do(func(st *reliable.State) { st.Receive(c) })
@@ -387,12 +418,17 @@ func (s *Session) wait(ctx context.Context, ch <-chan struct{}, d time.Duration)
 	select {
 	case <-ch:
 		return nil
+	case <-s.ended:
+		return errEnded
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-t.C():
 		return errTimeout
 	}
 }
+
+// errEnded is a wait cut short because the session ended; Err says why.
+var errEnded = errors.New("session ended")
 
 var errTimeout = errors.New("timed out")
 
@@ -568,6 +604,9 @@ func (s *Session) push(ctx context.Context) error {
 				if errors.Is(it.err, errMessageTooLong) {
 					return fail(api.StagePush, api.KindMessageTooLong, it.err)
 				}
+				if errors.Is(it.err, os.ErrDeadlineExceeded) {
+					return fail(api.StagePush, api.KindNotAdmitted, fmt.Errorf("no PUSH_REPLY within the handshake window of %v", s.cfg.HandshakeWindow))
+				}
 				return fail(api.StagePush, api.KindClosedByServer, it.err)
 			}
 			m := it.m
@@ -599,8 +638,11 @@ func (s *Session) push(ctx context.Context) error {
 
 func (s *Session) endFailure(stage api.Stage, end *endError) error {
 	kind := api.KindClosedByServer
-	if end.kind == endAuthFailed {
+	switch end.kind {
+	case endAuthFailed:
 		kind = api.KindAuthFailed
+	case endHalted:
+		kind = api.KindHalted
 	}
 	return fail(stage, kind, end)
 }
@@ -660,6 +702,41 @@ func (s *Session) ServerSession() wire.SessionID {
 	return s.serverSession
 }
 
+// dropEventsPerSecond bounds the drop events of each reason that a packet
+// from anyone can cause. The counters count every drop.
+const dropEventsPerSecond = 10
+
+// allowDropEvent reports whether one more drop event for reason fits in
+// this second's allowance.
+func (s *Session) allowDropEvent(reason string) bool {
+	sec := s.cfg.Clock.Now().Unix()
+	s.dropEventsMu.Lock()
+	defer s.dropEventsMu.Unlock()
+	if sec != s.dropEventsSecond || s.dropEvents == nil {
+		s.dropEventsSecond, s.dropEvents = sec, map[string]int{}
+	}
+	s.dropEvents[reason]++
+	return s.dropEvents[reason] <= dropEventsPerSecond
+}
+
+// hasEnded reports whether the session has ended.
+func (s *Session) hasEnded() bool {
+	select {
+	case <-s.ended:
+		return true
+	default:
+		return false
+	}
+}
+
+// mark records now in t as a duration from the session's base, which
+// keeps the clock's monotonic reading: a step of the wall clock moves
+// neither the ping nor the expiry.
+func (s *Session) mark(t *atomic.Int64) { t.Store(int64(s.cfg.Clock.Now().Sub(s.base))) }
+
+// stamp is the time mark recorded.
+func (s *Session) stamp(t *atomic.Int64) time.Time { return s.base.Add(time.Duration(t.Load())) }
+
 // RemoteAddr is the server's address on the link.
 func (s *Session) RemoteAddr() net.Addr { return s.lk.RemoteAddr() }
 
@@ -700,11 +777,14 @@ func (s *Session) sendExit() {
 	}
 }
 
-// Close sends EXIT, waits up to 2 s for it to be acknowledged, and tears the
-// session down. It is safe to call twice.
+// Close sends EXIT, if the server pushed cc-exit (spec notes 16), waits up
+// to ExitWait for it to be acknowledged, and tears the session down. It is
+// safe to call twice.
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
-		s.sendExit()
+		if slices.Contains(s.Push.Flags, "cc-exit") {
+			s.sendExit()
+		}
 		s.teardown()
 	})
 	return nil
@@ -730,6 +810,10 @@ func (s *Session) teardown() {
 	}
 	s.keyMu.Unlock()
 	clear(s.EKM)
+	// The connection state holds the exporter, which could derive the
+	// zeroed keys again. What the tls.Conn values keep inside crypto/tls
+	// is out of reach.
+	s.TLS = tls.ConnectionState{}
 	s.lk.Close()
 }
 
@@ -802,9 +886,8 @@ func (s *Session) setupData() error {
 	s.k0.opener = datachan.NewOpener(recv, 0, s.cfg.Clock.Now)
 	s.k0.phase, s.active = active, s.k0
 	s.keyMu.Unlock()
-	now := s.cfg.Clock.Now().UnixNano()
-	s.lastAuth.Store(now)
-	s.lastSend.Store(now)
+	s.mark(&s.lastAuth)
+	s.mark(&s.lastSend)
 	return nil
 }
 
@@ -834,15 +917,19 @@ func (s *Session) openData(b []byte, id uint8) {
 		return
 	case errors.Is(err, datachan.ErrReplay):
 		s.dataReplay.Add(1)
-		s.event(api.Event{Kind: api.EventPacketDropped, Stage: api.StageEstablished, KeyID: id, Reason: "replay"})
+		if s.allowDropEvent("replay") {
+			s.event(api.Event{Kind: api.EventPacketDropped, Stage: api.StageEstablished, KeyID: id, Reason: "replay"})
+		}
 		return
 	case err != nil:
 		s.dataAuthFailed.Add(1)
-		s.event(api.Event{Kind: api.EventPacketDropped, Stage: api.StageEstablished, KeyID: id, Reason: "authentication failed"})
+		if s.allowDropEvent("authentication failed") {
+			s.event(api.Event{Kind: api.EventPacketDropped, Stage: api.StageEstablished, KeyID: id, Reason: "authentication failed"})
+		}
 		return
 	}
 	s.dataOpened.Add(1)
-	s.lastAuth.Store(s.cfg.Clock.Now().UnixNano())
+	s.mark(&s.lastAuth)
 	ip, ok := datachan.Unframe(pt)
 	if ok && datachan.IsPing(ip) {
 		s.pingsReceived.Add(1)
@@ -858,7 +945,9 @@ func (s *Session) openData(b []byte, id uint8) {
 		s.bytesReceived.Add(int64(len(ip)))
 	default:
 		s.recvQueueFull.Add(1)
-		s.event(api.Event{Kind: api.EventPacketDropped, Stage: api.StageEstablished, KeyID: id, Reason: "receive queue full"})
+		if s.allowDropEvent("receive queue full") {
+			s.event(api.Event{Kind: api.EventPacketDropped, Stage: api.StageEstablished, KeyID: id, Reason: "receive queue full"})
+		}
 	}
 }
 
@@ -881,8 +970,11 @@ func (s *Session) seal(pt []byte) ([]byte, error) {
 		s.renegAsked.Store(true)
 		s.wake()
 	}
-	if err != nil {
+	switch {
+	case errors.Is(err, datachan.ErrPacketIDLimit):
 		return nil, fail(api.StageEstablished, api.KindPacketIDLimit, err)
+	case err != nil:
+		return nil, fail(api.StageEstablished, api.KindInternalFailure, err)
 	}
 	return pkt, nil
 }
@@ -892,7 +984,7 @@ func (s *Session) sendPing() error {
 	if err != nil {
 		return err
 	}
-	s.lastSend.Store(s.cfg.Clock.Now().UnixNano())
+	s.mark(&s.lastSend)
 	return s.lk.Write(pkt)
 }
 
@@ -903,7 +995,7 @@ func (s *Session) WritePacket(ip []byte) error {
 		return err
 	}
 	s.bytesSent.Add(int64(len(ip)))
-	s.lastSend.Store(s.cfg.Clock.Now().UnixNano())
+	s.mark(&s.lastSend)
 	return s.lk.Write(pkt)
 }
 

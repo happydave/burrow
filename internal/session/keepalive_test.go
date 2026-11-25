@@ -47,10 +47,10 @@ func TestOnlyAuthenticatedPacketsCountAsAlive(t *testing.T) {
 	srvSend, _, _ := datachan.KeysFromEKM(srv, "AES-256-GCM")
 	_, recv, _ := datachan.KeysFromEKM(ekm, "AES-256-GCM")
 	fake := clock.NewFake(time.Unix(1_000_000, 0))
-	s := &Session{cfg: Config{Clock: fake}, received: make(chan []byte, 4)}
+	s := &Session{cfg: Config{Clock: fake}, received: make(chan []byte, 4), base: fake.Now()}
 	k := &key{id: 0, phase: active, opener: datachan.NewOpener(recv, 0, fake.Now)}
 	s.keys, s.active = []*key{k}, k
-	s.lastAuth.Store(fake.Now().UnixNano())
+	s.mark(&s.lastAuth)
 	sealer := datachan.NewSealer(srvSend, 0, 0)
 	ping, _, _ := sealer.Seal(datachan.Frame(datachan.PingPayload))
 
@@ -58,11 +58,11 @@ func TestOnlyAuthenticatedPacketsCountAsAlive(t *testing.T) {
 	forged := append([]byte(nil), ping...)
 	forged[len(forged)-1] ^= 1
 	s.openData(forged, 0)
-	if got := s.lastAuth.Load(); got != time.Unix(1_000_000, 0).UnixNano() {
+	if got := s.stamp(&s.lastAuth); !got.Equal(time.Unix(1_000_000, 0)) {
 		t.Fatal("a forged packet reset the keepalive")
 	}
 	s.openData(ping, 0)
-	if got := s.lastAuth.Load(); got != fake.Now().UnixNano() {
+	if got := s.stamp(&s.lastAuth); !got.Equal(fake.Now()) {
 		t.Fatal("an authenticated ping did not reset the keepalive")
 	}
 	if s.pingsReceived.Load() != 1 || len(s.received) != 0 {
@@ -89,7 +89,7 @@ func TestDropEventsCarryTheReason(t *testing.T) {
 		if e.Kind == api.EventPacketDropped {
 			reasons = append(reasons, e.Reason)
 		}
-	}}, received: make(chan []byte, 1)}
+	}}, received: make(chan []byte, 1), base: fake.Now()}
 	k := &key{id: 0, phase: active, opener: datachan.NewOpener(recv, 0, fake.Now)}
 	s.keys, s.active = []*key{k}, k
 	sealer := datachan.NewSealer(srvSend, 0, 0)

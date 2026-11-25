@@ -54,7 +54,9 @@ func serverEnd(msg string) *endError {
 	case "AUTH_FAILED":
 		_, reason, _ := strings.Cut(msg, ",")
 		return &endError{kind: endAuthFailed, msg: msg, reason: reason}
-	case "RESTART", "HALT", "EXIT":
+	case "HALT":
+		return &endError{kind: endHalted, msg: name}
+	case "RESTART", "EXIT":
 		return &endError{kind: endClosedByServer, msg: name}
 	}
 	return nil
@@ -65,6 +67,7 @@ type endKind int
 const (
 	endAuthFailed endKind = iota
 	endClosedByServer
+	endHalted // the server asks the client not to reconnect (spec notes 9)
 )
 
 // endError is a server message that ended the session.

@@ -17,6 +17,11 @@ var errCertRejected = errors.New("server certificate rejected")
 // a leaf with no EKU for any usage, and does not check keyUsage, so both are
 // checked here.
 func verifyServer(chain []*x509.Certificate, pool *x509.CertPool, now time.Time) error {
+	if pool == nil {
+		// A nil pool would mean the system roots, and with no host-name
+		// check any public certificate with serverAuth would pass.
+		return fmt.Errorf("%w: no CA pool configured", errCertRejected)
+	}
 	if len(chain) == 0 {
 		return fmt.Errorf("%w: no certificate presented", errCertRejected)
 	}
@@ -55,8 +60,10 @@ func verifyServer(chain []*x509.Certificate, pool *x509.CertPool, now time.Time)
 // set together here so one is never set without the other.
 func tlsConfig(pool *x509.CertPool, cert tls.Certificate, now func() time.Time) *tls.Config {
 	return &tls.Config{
-		Certificates:       []tls.Certificate{cert},
-		MinVersion:         tls.VersionTLS12,
+		Certificates: []tls.Certificate{cert},
+		// TLS 1.3 only: the data keys' derivation under 1.2 (the exporter's
+		// context, spec notes 10.2) has not been observed.
+		MinVersion:         tls.VersionTLS13,
 		InsecureSkipVerify: true,
 		VerifyConnection: func(cs tls.ConnectionState) error {
 			return verifyServer(cs.PeerCertificates, pool, now())

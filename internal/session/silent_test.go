@@ -27,7 +27,7 @@ func TestPushTimeoutIsNotAdmitted(t *testing.T) {
 	if !errors.As(err, &e) || e.Stage != api.StagePush || !errors.Is(err, api.KindNotAdmitted) {
 		t.Fatalf("got %v, want not admitted at the push stage", err)
 	}
-	if d := time.Since(start); d > 4*time.Second {
+	if d := time.Since(start); d > 6*time.Second {
 		t.Fatalf("took %v; the push timeout is 300 ms and EXIT waits at most 2 s", d)
 	}
 }

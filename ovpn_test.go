@@ -171,9 +171,9 @@ func TestLoadTargetOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.TunMTU != 1450 || cfg.MSSFix != 1410 || !cfg.MSSFixPayload || cfg.ConnectTimeout != 20*time.Second ||
-		cfg.ConnectRetry != 5*time.Second || cfg.ConnectRetryMax != 60*time.Second {
+		cfg.ConnectRetry != 5*time.Second || cfg.ConnectRetryCap != 60*time.Second {
 		t.Fatalf("tun-mtu %d, mssfix %d payload %v, connect-timeout %v, connect-retry %v max %v",
-			cfg.TunMTU, cfg.MSSFix, cfg.MSSFixPayload, cfg.ConnectTimeout, cfg.ConnectRetry, cfg.ConnectRetryMax)
+			cfg.TunMTU, cfg.MSSFix, cfg.MSSFixPayload, cfg.ConnectTimeout, cfg.ConnectRetry, cfg.ConnectRetryCap)
 	}
 	if got := stackMTU(cfg, 0, false); got != 1385 {
 		t.Fatalf("stack MTU %d, want 1385 (mssfix 1410 without mtu, spec notes 18.3)", got)
@@ -256,6 +256,12 @@ var refusals = []struct{ input, want string }{
 	{strings.Replace(base, "ca keys/ca.crt", "ca keys/ca.crt # trailing comment", 1), "ca"},
 	{base + "tun-mtu 1400\ntun-mtu 1300\n", "twice"},
 	{base + "remote \"unterminated\n", "quote"},
+	{base + "dev tap\n", "dev"},
+	{base + "dev tap0\n", "dev"},
+	{base + "dev null\n", "dev"},
+	{base + "dev-type tap\n", "dev-type"},
+	{base + "mssfix 20\n", "mssfix"},
+	{base + "mssfix 60 mtu\n", "mssfix"},
 }
 
 func TestParseRefusals(t *testing.T) {
