@@ -14,6 +14,12 @@ import (
 
 func hookPath(t *testing.T) string {
 	t.Helper()
+	// The hook guards this repository's own coding sessions, not the
+	// library, so a machine that cannot run python3 (macOS before its
+	// developer tools are installed, say) skips these tests.
+	if err := exec.CommandContext(context.Background(), "python3", "-c", "pass").Run(); err != nil {
+		t.Skipf("python3 cannot run here (%v); the clean-room hook's tests need it", err)
+	}
 	out, err := exec.CommandContext(context.Background(), "go", "env", "GOMOD").Output()
 	if err != nil {
 		t.Fatalf("go env GOMOD: %v", err)

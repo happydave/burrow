@@ -68,4 +68,5 @@ GOOS=windows go build ./... && GOOS=darwin go build ./... && GOOS=freebsd go bui
 
 The licence gate (`internal/modlicense`) refuses any module in the build or test graph without an
 MIT, Apache-2.0, BSD or ISC licence. It needs the module cache populated (`go mod download`).
-`python3` must be on PATH for the hook and its tests.
+`python3` must be on PATH for the hook. Its tests skip, saying so, where `python3` cannot run, so the
+gate checks they ran (`go test -v ./internal/cleanroomguard` shows no SKIP).

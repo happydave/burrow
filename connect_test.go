@@ -24,10 +24,20 @@ type silentSocket struct {
 
 func listenSilent(t *testing.T, addr string) *silentSocket {
 	t.Helper()
+	s, err := tryListenSilent(t, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// tryListenSilent is listenSilent for an address the host may lack.
+func tryListenSilent(t *testing.T, addr string) (*silentSocket, error) {
+	t.Helper()
 	var lc net.ListenConfig
 	pc, err := lc.ListenPacket(context.Background(), "udp", addr)
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	s := &silentSocket{pc: pc}
 	done := make(chan struct{})
@@ -42,7 +52,7 @@ func listenSilent(t *testing.T, addr string) *silentSocket {
 		}
 	}()
 	t.Cleanup(func() { pc.Close(); <-done })
-	return s
+	return s, nil
 }
 
 func (s *silentSocket) addr() string { return s.pc.LocalAddr().String() }
@@ -122,9 +132,16 @@ func TestFailoverBothSilent(t *testing.T) {
 
 func TestFailoverReachesAnsweringServer(t *testing.T) {
 	srv := fakeserver.StartSilent(t)
-	a := listenSilent(t, "127.0.0.2:0")
-	cfg := walkConfig(srv, a.addr(), srv.Addr())
-	rec, err := tryConnect(t, context.Background(), cfg, nil)
+	a := listenSilent(t, "127.0.0.1:0")
+	_, aPort, _ := net.SplitHostPort(a.addr())
+	// The silent remote goes by a name, so the two remotes are two hosts in
+	// the ban domain while every socket stays on 127.0.0.1, the one
+	// loopback address every platform has.
+	res := resolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	})
+	cfg := walkConfig(srv, "silent.test:"+aPort, srv.Addr())
+	rec, err := tryConnect(t, context.Background(), cfg, func(d *dialer) { d.resolver = res })
 	var e *Error
 	if !errors.As(err, &e) || e.Stage != StagePush || !errors.Is(err, KindNotAdmitted) {
 		t.Fatalf("err %v, want not admitted at the push stage", err)
@@ -134,7 +151,7 @@ func TestFailoverReachesAnsweringServer(t *testing.T) {
 	}
 	// Both attempts are in the configuration's one domain: not counted for
 	// the silent remote, refused for the server.
-	rs, err := cfg.AdmissionStore.Records("127.0.0.1,127.0.0.2")
+	rs, err := cfg.AdmissionStore.Records("127.0.0.1,silent.test")
 	if err != nil || len(rs) != 2 || rs[0].Outcome != admission.NotCounted || rs[1].Outcome != admission.Refused {
 		t.Fatalf("records %+v, %v; want not counted then refused, in one domain", rs, err)
 	}
@@ -155,15 +172,28 @@ func TestNoFailoverAfterAnswer(t *testing.T) {
 func TestFailoverAcrossAddresses(t *testing.T) {
 	srv := fakeserver.StartSilent(t)
 	_, port, _ := net.SplitHostPort(srv.Addr())
-	other := listenSilent(t, "127.0.0.2:"+port)
+	// A second loopback address on the fake server's port: ::1, or
+	// 127.0.0.2 where IPv6 is off. macOS configures only 127.0.0.1 of the
+	// IPv4 loopback range.
+	var other *silentSocket
+	var second netip.Addr
+	for _, a := range []string{"::1", "127.0.0.2"} {
+		if s, err := tryListenSilent(t, net.JoinHostPort(a, port)); err == nil {
+			other, second = s, netip.MustParseAddr(a)
+			break
+		}
+	}
+	if other == nil {
+		t.Skipf("no second loopback address (::1 or 127.0.0.2) can be bound on port %s", port)
+	}
 	res := resolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
-		return []netip.Addr{netip.MustParseAddr("127.0.0.2"), netip.MustParseAddr("127.0.0.1")}, nil
+		return []netip.Addr{second, netip.MustParseAddr("127.0.0.1")}, nil
 	})
 	rec, err := tryConnect(t, context.Background(), walkConfig(srv, "vpn.example:"+port), func(d *dialer) { d.resolver = res })
 	if !errors.Is(err, KindNotAdmitted) {
 		t.Fatalf("err %v, want not admitted from the second address", err)
 	}
-	want := []string{"127.0.0.2:" + port, "127.0.0.1:" + port}
+	want := []string{net.JoinHostPort(second.String(), port), "127.0.0.1:" + port}
 	if got := rec.of(EventRemoteChosen); len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("addresses tried %q, want %q", got, want)
 	}
