@@ -1,0 +1,9 @@
+# Scratch space and gate logs; never committed
+/tmp/
+
+# Go test binaries and profiles
+*.test
+*.out
+
+# One site's local instructions for coding sessions
+CLAUDE.local.md

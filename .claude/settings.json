@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "deny": [
+      "WebSearch",
+      "Read(~/go/pkg/mod/github.com/ooni/**)",
+      "Read(~/go/pkg/mod/cache/download/github.com/ooni/**)",
+      "Bash(*ooni/minivpn*)",
+      "Bash(*OpenVPN/openvpn3*)",
+      "Bash(git clone *OpenVPN/openvpn*)",
+      "Bash(go get *ooni*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|WebFetch|Read|Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/cleanroom-guard\""
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""cleanroom-guard: a Claude Code PreToolUse hook enforcing burrow's clean-room rule.
+
+burrow is a permissively licensed reimplementation of a protocol whose reference
+implementations are GPL, so sessions in this repository must not read their source.
+Given a tool call as JSON on stdin, it exits 2 with the reason on stderr when the call names
+a denied source, and 0 otherwise. Text is matched, not parsed, so a program path, `sh -c`
+or a URL held in a shell variable is caught where a permission rule is not. An unreadable
+call is refused.
+"""
+import json
+import re
+import sys
+
+INSPECTED = {"Bash", "WebFetch", "Read", "Grep", "Glob"}
+
+DENIED = [
+    (re.compile(r"ooni/minivpn"), "ooni/minivpn (GPL-3.0)"),
+    (re.compile(r"openvpn/openvpn3"), "OpenVPN 3 (AGPL)"),
+    (re.compile(r"ics-openvpn"), "ics-openvpn (GPL)"),
+    (re.compile(r"mysteriumnetwork/go-openvpn"), "go-openvpn (AGPL)"),
+    (re.compile(r"tunnelkit"), "TunnelKit (GPL-3.0)"),
+    (re.compile(r"packet-openvpn"), "Wireshark's OpenVPN dissector (GPL)"),
+    (re.compile(r"drivers/net/ovpn"), "the Linux kernel ovpn driver (GPL-2.0)"),
+    (re.compile(r"build\.openvpn\.net/doxygen"), "doxygen generated from OpenVPN 2 source (GPL-2.0)"),
+]
+
+# OpenVPN 2's repository is GPL-2.0 except for its prose under doc/, which the spec notes cite.
+# "openvpn/openvpn-rfc" (the protocol draft) is a different repository and is allowed.
+OPENVPN2 = re.compile(r"openvpn/openvpn(?![-\w])")
+OPENVPN2_DOC = re.compile(r"openvpn/openvpn/(?:(?:blob|tree|raw)/)?[^/\s\"']+/doc/")
+# A path that climbs out of doc/ ("doc/../src/…", or its percent-encoded form) is not under it.
+CLIMB = re.compile(r"\.\.|%2e%2e|%2e\.|\.%2e")
+
+
+def decide(call):
+    """Returns the refusal reason for a decoded tool call, or None to allow it."""
+    if not isinstance(call, dict):
+        return "the tool call is not a JSON object"
+    if call.get("tool_name") not in INSPECTED:
+        return None
+    text = json.dumps(call.get("tool_input", {})).lower()
+    for pattern, name in DENIED:
+        if pattern.search(text):
+            return name
+    for m in OPENVPN2.finditer(text):
+        doc = OPENVPN2_DOC.match(text, m.start())
+        rest = text[doc.end():].split()[0] if doc and text[doc.end():].split() else ""
+        if not doc or CLIMB.search(rest):
+            return "OpenVPN 2 source (GPL-2.0); only its doc/ directory may be read"
+    return None
+
+
+def main():
+    try:
+        call = json.load(sys.stdin)
+    except ValueError as exc:
+        print(f"cleanroom-guard: cannot read the tool call ({exc}); refusing", file=sys.stderr)
+        return 2
+    reason = decide(call)
+    if reason is None:
+        return 0
+    print(f"cleanroom-guard: refused: this call names {reason}. burrow is clean-room: "
+          "copyleft implementations of the protocol are never read here (CLAUDE.md).",
+          file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

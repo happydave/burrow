@@ -1,0 +1,10 @@
+# The interop harness's OpenVPN server and stock client. BASE is a fully
+# qualified Ubuntu image: 26.04 gives openvpn 2.7.0, 24.04 gives 2.6.19.
+# busybox serves HTTP on the server's tunnel address. A change here bumps
+# the image version in run.sh, so a stale image is rebuilt.
+ARG BASE
+FROM ${BASE}
+RUN apt-get update -qq \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+      openvpn openssl iproute2 tcpdump ca-certificates busybox >/dev/null \
+ && rm -rf /var/lib/apt/lists/*

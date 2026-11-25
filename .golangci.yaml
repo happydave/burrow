@@ -1,0 +1,20 @@
+version: "2"
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - errcheck
+    - errorlint
+    - govet
+    - ineffassign
+    - noctx
+    - staticcheck
+    - unused
+  exclusions:
+    generated: lax
+    presets:
+      - std-error-handling
+formatters:
+  enable:
+    - gofmt
+    - goimports
