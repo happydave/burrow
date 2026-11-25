@@ -15,9 +15,19 @@ func fixedNow() time.Time { return now }
 
 func stores(t *testing.T) map[string]func() Store {
 	path := filepath.Join(t.TempDir(), "history.json")
-	return map[string]func() Store{
-		"memory": func() Store { return &Memory{} },
-		"file":   func() Store { return &File{Path: path, Now: fixedNow} },
+	m := map[string]func() Store{"memory": func() Store { return &Memory{} }}
+	if fileLocking {
+		m["file"] = func() Store { return &File{Path: path, Now: fixedNow} }
+	}
+	return m
+}
+
+// needFileLock skips a file-store test where the store refuses for want
+// of flock.
+func needFileLock(t *testing.T) {
+	t.Helper()
+	if !fileLocking {
+		t.Skip("the file store needs flock, which this platform lacks")
 	}
 }
 
@@ -60,6 +70,7 @@ func TestNotCountedFreesTheSlot(t *testing.T) {
 }
 
 func TestFileStoreSurvivesRestartAndKilledAttempts(t *testing.T) {
+	needFileLock(t)
 	path := filepath.Join(t.TempDir(), "history.json")
 	a := &File{Path: path, Now: fixedNow}
 	id, err := a.Reserve("d", "r", DefaultPolicy, now)
@@ -81,6 +92,7 @@ func TestFileStoreSurvivesRestartAndKilledAttempts(t *testing.T) {
 }
 
 func TestFileStoreLockAllowsOneOfManyForTheLastSlot(t *testing.T) {
+	needFileLock(t)
 	for round := range 10 {
 		path := filepath.Join(t.TempDir(), "history.json")
 		seed := &File{Path: path, Now: fixedNow}
@@ -111,6 +123,7 @@ func TestFileStoreLockAllowsOneOfManyForTheLastSlot(t *testing.T) {
 }
 
 func TestCorruptHistoryRefuses(t *testing.T) {
+	needFileLock(t)
 	path := filepath.Join(t.TempDir(), "history.json")
 	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
@@ -125,6 +138,7 @@ func TestCorruptHistoryRefuses(t *testing.T) {
 }
 
 func TestMissingDirectoryRefuses(t *testing.T) {
+	needFileLock(t)
 	s := &File{Path: filepath.Join(t.TempDir(), "absent", "history.json")}
 	if _, err := s.Reserve("d", "r", DefaultPolicy, now); err == nil {
 		t.Fatal("reserve succeeded with no directory for the history")
@@ -132,6 +146,7 @@ func TestMissingDirectoryRefuses(t *testing.T) {
 }
 
 func TestFileStorePrunesByItsClock(t *testing.T) {
+	needFileLock(t)
 	for _, c := range []struct {
 		age  time.Duration
 		kept int

@@ -64,6 +64,10 @@ func (l *Link) read() {
 			if errors.Is(err, syscall.ECONNREFUSED) {
 				continue
 			}
+			if tooBig(err) {
+				l.oversize.Add(1)
+				continue
+			}
 			if !errors.Is(err, net.ErrClosed) {
 				l.err = err
 			}
